@@ -1358,10 +1358,10 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
         # Simple boundary check - create new page if needed
         simple_boundary_check(max_h)
 
-        # Create left column frame with its actual needed height
-        left_frame = scribus.createText(MARGINS[0], y_offset, col_width, left_h)
-        # Create right column frame with its actual needed height
-        right_frame = scribus.createText(MARGINS[0] + col_width + COLUMN_GAP, y_offset, col_width, right_h)
+        # Create minimal frames and let overflow handling expand to exact size
+        minimal_height = font_size * 2  # Start with minimal height
+        left_frame = scribus.createText(MARGINS[0], y_offset, col_width, minimal_height)
+        right_frame = scribus.createText(MARGINS[0] + col_width + COLUMN_GAP, y_offset, col_width, minimal_height)
 
         # Use the maximum height for y_offset calculation but frames use individual heights
         text_h = max_h
@@ -3726,7 +3726,10 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
             break
             
         create_styled_header(f"{area.get('name','Unnamed')}", 11, True, "None", "Black", 5)
-        place_text_block_flow(area.get("desc",""), AREA_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
+        # Simple two-column text flow with equal heights for descriptions
+        desc_text = area.get("desc","")
+        if desc_text:
+            place_text_block_flow(desc_text, AREA_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
 
         for chap in area.get("chapters", []):
             if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
@@ -3743,8 +3746,10 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
                 create_topic_header(current_topic_text)
                 add_vertical_topic_banner(current_topic_text)
 
-                # Display topic description
-                place_text_block_flow(topic.get("desc",""), TOPIC_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
+                # Simple two-column text flow with equal heights for topic descriptions
+                desc_text = topic.get("desc","")
+                if desc_text:
+                    place_text_block_flow(desc_text, TOPIC_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
                 
                 for mod in topic.get("modules", []):
                     if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
