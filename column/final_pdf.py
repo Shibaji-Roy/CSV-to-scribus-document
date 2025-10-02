@@ -1247,7 +1247,7 @@ def place_roadsigns_grid(images, base_path, start_y, max_height=None, frame_x=No
     return current_y
 
 # ─────────── TEXT PLACEMENT FUNCTIONS ────────────
-def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False, no_bottom_gap=False, is_heading=False, balanced_columns=False):
+def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False, no_bottom_gap=False, is_heading=False, balanced_columns=False, custom_spacing=None):
     """
     Place an HTML text block with flowing text and formatting.
     Uses the proven working approach with optional two-column layout for descriptions.
@@ -1576,8 +1576,13 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
                     break
 
     # Update y_offset to position after this frame
-    # Reduce spacing for elements that request no bottom gap
-    spacing = 0 if no_bottom_gap else BLOCK_SPACING
+    # Smart spacing system: use custom spacing if provided, otherwise use defaults
+    if custom_spacing is not None:
+        spacing = custom_spacing
+    elif no_bottom_gap:
+        spacing = 0
+    else:
+        spacing = BLOCK_SPACING
 
     try:
         if balanced_columns and len(frames_to_setup) > 1:
@@ -1647,8 +1652,8 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
 
         text = text.rstrip()
 
-        # Use enhanced text placement with proper template overflow handling
-        frame = place_text_block_flow(text, default_font_size, False, in_template)
+        # Use enhanced text placement with proper template overflow handling (within topic - 2px gap)
+        frame = place_text_block_flow(text, default_font_size, False, in_template, custom_spacing=RELATED_ELEMENT_SPACING)
 
         # Additional template-specific overflow safety check
         if in_template and frame:
@@ -3384,7 +3389,8 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding):
                 scribus.sizeObject(text_width, scribus.getSize(text_frame)[1], text_frame)
         except:
             pass
-    spacing_after = BLOCK_SPACING * 0.25 if is_template_header else BLOCK_SPACING
+    # Smart spacing: template headers get almost no gap, regular headers get minimal gap
+    spacing_after = 0 if is_template_header else RELATED_ELEMENT_SPACING
     y_offset += text_h + spacing_after
     
     # Simple final constraint
@@ -3726,10 +3732,11 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
             break
             
         create_styled_header(f"{area.get('name','Unnamed')}", 11, True, "None", "Black", 5)
-        # Simple two-column text flow with equal heights for descriptions
+        # Area description follows area header - hierarchical 2px gap
         desc_text = area.get("desc","")
         if desc_text:
-            place_text_block_flow(desc_text, AREA_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
+            # After description, next element (chapter) needs 5px gap
+            place_text_block_flow(desc_text, AREA_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=UNRELATED_ELEMENT_SPACING)
 
         for chap in area.get("chapters", []):
             if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
@@ -3746,10 +3753,10 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
                 create_topic_header(current_topic_text)
                 add_vertical_topic_banner(current_topic_text)
 
-                # Simple two-column text flow with equal heights for topic descriptions
+                # Topic description follows topic header (2px), but needs gap for next element (5px after)
                 desc_text = topic.get("desc","")
                 if desc_text:
-                    place_text_block_flow(desc_text, TOPIC_DESC_FONT_SIZE, no_bottom_gap=True, balanced_columns=True)
+                    place_text_block_flow(desc_text, TOPIC_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=UNRELATED_ELEMENT_SPACING)
                 
                 for mod in topic.get("modules", []):
                     if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
