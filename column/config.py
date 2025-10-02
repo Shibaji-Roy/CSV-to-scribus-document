@@ -61,6 +61,10 @@ MIN_SPACE_THRESHOLD = 4     # Minimum space required before forcing a new page
 TEMPLATE_PADDING = 0        # No padding between templates
 MIN_BOTTOM_SPACE = 5        # Minimal space at bottom of page
 
+# Smart spacing system
+RELATED_ELEMENT_SPACING = 1     # Very tight spacing for header + description
+UNRELATED_ELEMENT_SPACING = 4   # Spacing between different element types
+
 # Text padding (left, right, top, bottom) in points
 TEMPLATE_TEXT_PADDING = (0, 0, 0, 0)    # No padding for maximum space
 REGULAR_TEXT_PADDING = (0, 0, 0, 0)     # No padding for maximum space
