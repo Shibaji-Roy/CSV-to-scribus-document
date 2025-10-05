@@ -61,9 +61,11 @@ MIN_SPACE_THRESHOLD = 4     # Minimum space required before forcing a new page
 TEMPLATE_PADDING = 0        # No padding between templates
 MIN_BOTTOM_SPACE = 5        # Minimal space at bottom of page
 
-# Smart spacing system
-RELATED_ELEMENT_SPACING = 1     # Very tight spacing for header + description
-UNRELATED_ELEMENT_SPACING = 4   # Spacing between different element types
+# Hierarchical spacing system based on JSON structure
+HEADER_TO_DESC_SPACING = 2      # Very tight spacing: header → its description
+MODULE_TO_TEMPLATE_SPACING = 1  # Minimal spacing: module name → template content
+TEMPLATE_TO_TEMPLATE_SPACING = 3 # Small spacing: template → next template
+SECTION_TO_SECTION_SPACING = 8  # Medium spacing: topic → next topic, chapter → chapter
 
 # Text padding (left, right, top, bottom) in points
 TEMPLATE_TEXT_PADDING = (0, 0, 0, 0)    # No padding for maximum space
@@ -144,8 +146,8 @@ QUIZ_HEADING_FONT_SIZE = 14     # Font size for quiz heading
 QUIZ_LENGTH = PAGE_WIDTH - MARGINS[0] - MARGINS[2] - 20  # Width of quiz section (adjusted for wider page)
 QUIZ_CARD_SPACING = 0           # No spacing between question cards for compact layout
 QUIZ_QUESTION_PADDING = 1       # Minimal internal padding for question text
-QUIZ_HORIZONTAL_SPACING = 8     # Minimal space between question text and answer box
-MIN_QUIZ_SPACING = 2            # Minimal space between quiz items
+QUIZ_HORIZONTAL_SPACING = 4     # Reduced space between question text and answer box
+MIN_QUIZ_SPACING = 1            # Reduced space between quiz items
 
 # Answer box settings
 QUIZ_ANSWER_BOX_WIDTH = 60      # Width of the answer box
