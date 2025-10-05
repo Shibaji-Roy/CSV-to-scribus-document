@@ -21,6 +21,24 @@ except ImportError:
     import sys
     scribus.messageBox("Config Error", "Could not import config.py. Using default values.", scribus.ICON_WARNING)
 
+# Ensure spacing constants are defined (for IDE/linting support)
+try:
+    HEADER_TO_DESC_SPACING
+except NameError:
+    HEADER_TO_DESC_SPACING = 2
+try:
+    MODULE_TO_TEMPLATE_SPACING
+except NameError:
+    MODULE_TO_TEMPLATE_SPACING = 1
+try:
+    TEMPLATE_TO_TEMPLATE_SPACING
+except NameError:
+    TEMPLATE_TO_TEMPLATE_SPACING = 3
+try:
+    SECTION_TO_SECTION_SPACING
+except NameError:
+    SECTION_TO_SECTION_SPACING = 8
+
 try:
     from PIL import Image
 except ImportError:
@@ -1056,7 +1074,8 @@ def new_page():
 
     # Force refresh to show live page creation updates
     scribus.redrawAll()
-    # DON'T reset quiz_heading_placed_on_page - preserve quiz header state across pages
+    # Reset quiz header flag for new page - each page gets its own quiz header
+    quiz_heading_placed_on_page = False
     # Add vertical topic banner to the new page if we have an active topic
     # This will automatically position it based on whether the new page is odd or even
     if current_topic_text:
@@ -1576,13 +1595,11 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
                     break
 
     # Update y_offset to position after this frame
-    # Smart spacing system: use custom spacing if provided, otherwise use defaults
+    # Use hierarchical spacing if provided, otherwise use standard spacing logic
     if custom_spacing is not None:
         spacing = custom_spacing
-    elif no_bottom_gap:
-        spacing = 0
     else:
-        spacing = BLOCK_SPACING
+        spacing = 0 if no_bottom_gap else BLOCK_SPACING
 
     try:
         if balanced_columns and len(frames_to_setup) > 1:
@@ -1629,10 +1646,82 @@ def is_dark_color(color_name):
     return True
 
 # ───────── TEXT + IMAGE COMBINED LAYOUT ─────────
+def place_roadsigns_on_right(roadsign_list, base_path):
+    """Places road signs horizontally on the right side with bounding boxes and text flow."""
+    global y_offset
+
+    if not roadsign_list:
+        return
+
+    # Road sign dimensions
+    sign_width = 35  # Road sign width
+    sign_height = 35  # Road sign height
+    sign_spacing = 4  # Spacing between multiple signs
+    box_padding = 2  # Padding inside bounding box
+
+    # Calculate total width needed for all road signs
+    valid_signs = [rs for rs in roadsign_list if rs]
+    num_signs = len(valid_signs)
+
+    if num_signs == 0:
+        return
+
+    # Calculate layout for road signs on the right
+    total_signs_width = (num_signs * sign_width) + ((num_signs - 1) * sign_spacing) + (box_padding * 2)
+    signs_area_x = PAGE_WIDTH - MARGINS[2] - total_signs_width  # Right-aligned
+    signs_height = sign_height + (box_padding * 2)
+
+    # Current y position for the road signs (same level as text)
+    block_y = y_offset - signs_height - 6  # Position to align with text
+
+    # Check space for road signs
+    force_new_page_if_needed(signs_height)
+
+    # Draw overall bounding box for all road signs with text flow properties
+    signs_bounding_box = scribus.createRect(signs_area_x, block_y, total_signs_width, signs_height)
+    scribus.setLineColor("Black", signs_bounding_box)
+    scribus.setLineWidth(0.5, signs_bounding_box)
+    scribus.setFillColor("None", signs_bounding_box)
+
+    # Apply text flow properties to make template text flow around the road signs
+    try:
+        # Set the text flow mode so text wraps around this shape
+        scribus.setTextFlowMode(signs_bounding_box, 1)  # 1 = text flows around frame
+        scribus.setTextFlowUsesFrame(signs_bounding_box, True)  # Use frame boundaries
+        scribus.setTextFlowUsesBoundingBox(signs_bounding_box, True)  # Use bounding box for flow
+    except Exception as e:
+        # Fallback if text flow functions are not available
+        pass
+
+    # Place road signs horizontally inside the bounding box
+    current_sign_x = signs_area_x + box_padding
+    for roadsign in valid_signs:
+        try:
+            img_path = os.path.join(base_path, roadsign)
+            if os.path.exists(img_path):
+                sign_frame = scribus.createImage(
+                    current_sign_x,
+                    block_y + box_padding,
+                    sign_width,
+                    sign_height
+                )
+                scribus.loadImage(img_path, sign_frame)
+                scribus.setScaleImageToFrame(True, True, sign_frame)
+                scribus.setImageScaleMode(1, sign_frame)  # Scale to frame proportionally
+        except Exception as e:
+            print(f"Could not load roadsign: {roadsign}")
+
+        # Move to next sign position
+        current_sign_x += sign_width + sign_spacing
+
+    return
+
+
 def place_wrapped_text_and_images(text_arr, image_list, base_path,
                                 default_font_size=6, in_template=False, alignment="C"):
     """Places text in clean columns and images separately below text."""
     global y_offset
+
     text_arr = [str(t) for t in (text_arr or [])]
 
     # Clean text items
@@ -1652,8 +1741,8 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
 
         text = text.rstrip()
 
-        # Use enhanced text placement with proper template overflow handling (within topic - 2px gap)
-        frame = place_text_block_flow(text, default_font_size, False, in_template, custom_spacing=RELATED_ELEMENT_SPACING)
+        # Use enhanced text placement with proper template overflow handling
+        frame = place_text_block_flow(text, default_font_size, False, in_template)
 
         # Additional template-specific overflow safety check
         if in_template and frame:
@@ -1663,7 +1752,7 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
             except:
                 pass
 
-    # Place images below the text (like in the example image)
+    # Place regular images below the text (not road signs)
     if image_list:
         # Place images in a grid below the text
         if len(image_list) == 1:
@@ -1671,13 +1760,14 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
             place_images_grid(image_list, base_path, y_offset, max_height=100)
         else:
             # Multiple images - use appropriate grid
-            if any("roadsign" in img.lower() or "sign" in img.lower() for img in image_list):
-                place_roadsigns_grid(image_list, base_path, y_offset, max_height=80)
-            else:
-                place_images_grid(image_list, base_path, y_offset, max_height=120)
+            place_images_grid(image_list, base_path, y_offset, max_height=120)
 
     return
 
+# Removed duplicate/broken functions - using working versions below
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ─────────── QUIZ PLACEMENT FUNCTIONS ────────────
 def strip_html_tags(text):
     """Remove all HTML tags from a string."""
     if not text or not isinstance(text, str):
@@ -1685,53 +1775,453 @@ def strip_html_tags(text):
     return re.sub(r'<[^>]+>', '', text)
 
 def place_quiz(arr, in_template=True, group_image=None, base_path=None):
-    global y_offset, CURRENT_COLOR, column_mgr
+    global y_offset, CURRENT_COLOR
     global quiz_heading_placed_on_page
 
-    # Enable quiz mode (single column mode for quizzes)
-    column_mgr.set_quiz_mode(True)
+    # Simple quiz placement without column manager - like dopy.py
 
     if not PRINT_QUIZZES:
-        column_mgr.set_quiz_mode(False)  # Reset before returning
         return
     if not arr or not isinstance(arr, list):
-        column_mgr.set_quiz_mode(False)  # Reset before returning
         return
-        
-    # NOTE: This function appears to be corrupted/incomplete - using the correct place_quiz function below
-    column_mgr.set_quiz_mode(False)  # Reset and exit early
-    return
-
-    while remaining:
-        # Calculate available space with minimal buffer for page numbers
-        # Use just 10 points to ensure page numbers are visible
-        minimal_buffer = 10
-        max_available_height = column_mgr.get_available_height() - minimal_buffer
-
-        if max_available_height < MIN_SPACE_THRESHOLD:
-            column_mgr.switch_column()
-            minimal_buffer = 10
-            max_available_height = column_mgr.get_available_height() - minimal_buffer
-
-        # Measure text height first to create properly sized frame
-        estimated_height = measure_text_height(remaining, frame_w, in_template, QUIZ_QUESTION_FONT_SIZE)
-
-        # Use much larger safety margin to prevent overflow crosses
-        safety_margin = max(estimated_height * 0.5, 30)  # 50% safety margin or 30pt minimum
-        actual_frame_height = min(max(estimated_height + safety_margin, 50), max_available_height)
-
-        # Create frame with properly calculated height
-        frame_x = column_mgr.get_column_x()
-        frame_y = column_mgr.get_current_y()
-        frame = scribus.createText(frame_x, frame_y, frame_w, actual_frame_height)
-        try: scribus.setLineColor("None", frame)
-        except: pass
-        try:
-            if in_template:
-                scribus.setTextDistances(*TEMPLATE_TEXT_PADDING, frame)
+    # Filter quiz items based on QUIZ_FILTER_MODE
+    filtered_arr = []
+    for qa in arr:
+        if not isinstance(qa, dict):
+            continue
+        # Remove HTML tags from question and answer
+        if 'que' in qa:
+            qa['que'] = strip_html_tags(qa['que'])
+        if 'ans' in qa:
+            qa['ans'] = strip_html_tags(qa['ans'])
+        # Get the answer text to check if it's true (V) or false (F)
+        answer_text = qa.get('ans', '').strip()
+        is_true = qa.get('is_true', None)
+        if is_true is None:
+            if answer_text.endswith(QUIZ_TRUE_TEXT) or f'A: {QUIZ_TRUE_TEXT}' in answer_text:
+                is_true = True
+            elif answer_text.endswith(QUIZ_FALSE_TEXT) or f'A: {QUIZ_FALSE_TEXT}' in answer_text:
+                is_true = False
             else:
-                scribus.setTextDistances(*REGULAR_TEXT_PADDING, frame)
-        except: pass
+                is_true = True
+        if QUIZ_FILTER_MODE == "true_only" and not is_true:
+            continue
+        elif QUIZ_FILTER_MODE == "false_only" and is_true:
+            continue
+        qa['is_true'] = is_true
+        filtered_arr.append(qa)
+    if not filtered_arr:
+        return
+    # Copy 6 layout style from quiz_from_csv.py
+    quiz_width = PAGE_WIDTH - MARGINS[0] - MARGINS[2]
+    header_height = 24  # Reduced blue header height (matching dopy.py)
+    row_height = 16  # Increased row height for larger 9pt font (matching dopy.py)
+    answer_box_width = 18  # V/F box width
+    answer_box_height = 16  # V/F box height increased for 10pt font (matching dopy.py)
+    answer_box_gap = 3  # Gap between V and F boxes
+    # Draw blue header like copy 6 (from quiz_from_csv.py)
+    if not quiz_heading_placed_on_page:
+        # Define colors if not exists
+        try:
+            scribus.defineColor("Cyan", 0, 160, 224)  # Blue color
+            scribus.defineColor("Yellow", 255, 255, 0)
+            scribus.defineColor("NumBoxBlue", 210, 235, 255)
+        except:
+            pass
+
+        # Create blue header background
+        header_bg = scribus.createRect(MARGINS[0], y_offset, quiz_width, header_height)
+        scribus.setFillColor("Cyan", header_bg)
+        scribus.setLineColor("Cyan", header_bg)
+
+        # Quiz header text
+        header_text = scribus.createText(MARGINS[0] + 3, y_offset + 3, quiz_width - 35, header_height - 6)
+        scribus.setText("Quiz", header_text)
+        try:
+            scribus.setFont(DEFAULT_FONT, header_text)
+        except:
+            try:
+                available_fonts = scribus.getFontNames()
+                if available_fonts:
+                    scribus.setFont(available_fonts[0], header_text)
+            except:
+                pass
+        scribus.setFontSize(10, header_text)
+        scribus.setTextColor("White", header_text)
+        scribus.setTextAlignment(0, header_text)
+
+        # Configure header text wrapping and overflow control like copy6.py
+        try:
+            scribus.setTextDistances(1, 1, 1, 1, header_text)  # Minimal padding
+            scribus.setLineSpacing(10, header_text)  # Adjusted line spacing for 10pt font
+
+            # Force text to fit within frame bounds - prevent header overflow
+            try:
+                scribus.setTextBehaviour(header_text, 0)  # Force text to stay in frame
+            except:
+                try:
+                    scribus.setTextToFrameOverflow(header_text, False)  # Disable overflow
+                except:
+                    pass
+
+            # Enable text wrapping for headers
+            try:
+                scribus.setTextFlowMode(header_text, 0)  # Enable text flow
+            except:
+                pass
+
+        except:
+            pass
+
+        # Yellow page number box (optional)
+        id_width = 30
+        id_bg = scribus.createRect(MARGINS[0] + quiz_width - id_width, y_offset, id_width, header_height)
+        scribus.setFillColor("Yellow", id_bg)
+        scribus.setLineColor("Black", id_bg)
+
+        quiz_heading_placed_on_page = True
+        y_offset += header_height  # No gap after header - like dopy.py
+        enforce_margin_boundary()
+    # Add the exact text overflow function from quiz_from_csv.py
+    def check_text_overflow(text, width, font_size, default_height, is_header=False):
+        """Check if text will overflow and calculate required height if needed"""
+        # More conservative estimation to ensure no overflow
+        if is_header:
+            # Headers: more conservative estimate
+            chars_per_line = width / (font_size * 0.45)
+        else:
+            # Regular text: use copy6.py original values
+            chars_per_line = width / (font_size * 0.42)  # Copy6.py original value
+
+        # Check if text truly needs multiple lines
+        # Use copy6.py original threshold
+        if len(text) <= chars_per_line * 0.85:  # Copy6.py original 85% threshold
+            return default_height  # Single line - use compact height
+
+        # Calculate actual lines needed
+        lines_needed = int(len(text) / chars_per_line) + 1
+
+        # Special handling for borderline cases (text near one line) - safe
+        if len(text) > chars_per_line * 0.85 and len(text) <= chars_per_line * 1.2:
+            # Text is close to or slightly over one line - safe version
+            return default_height * 1.3  # Safe 30% more height to prevent overflow
+
+        # Calculate required height for true multi-line content - safe spacing
+        line_height = font_size * 1.2  # Safe line height to prevent overflow
+        calculated_height = lines_needed * line_height + 3  # Safe padding for line spacing
+
+        # Add buffer for safety - prevent overflow
+        calculated_height = calculated_height * 1.1  # 10% buffer to prevent overflow
+
+        # Return calculated height
+        return max(default_height, calculated_height)
+
+    # Process each question as a table row (from quiz_from_csv.py)
+    for idx, qa in enumerate(filtered_arr):
+        # Use simple y_offset like dopy.py
+        current_quiz_y = y_offset
+
+        question = qa.get('que', '')
+        is_true = qa.get('is_true', False)
+
+        # Keep it very simple - just remove HTML tags and show plain text
+        formatted_question = re.sub(r'<[^>]+>', '', question)
+        cleaned_question_for_calc = formatted_question
+
+        # Apply superscript conversion for height calculation too
+        display_question_for_calc = re.sub(r'cm(\d)', lambda m: 'cm' + {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'}[m.group(1)], cleaned_question_for_calc)
+
+        # Calculate row height using corrected text width (matches the fixed positioning)
+        text_width = quiz_width - 42  # Adjusted to match the new text box positioning
+        current_row_height = check_text_overflow(display_question_for_calc, text_width, 8, row_height, is_header=False)
+
+        # Simple boundary check
+        simple_boundary_check(current_row_height)
+
+        # Draw answer row exactly like copy 6 (from quiz_from_csv.py)
+        # Remove number box background - no numbering needed
+        # num_box_bg = scribus.createRect(MARGINS[0] + 2, y_offset, 12, current_row_height - 1)
+        # scribus.setFillColor("NumBoxBlue", num_box_bg)
+        # scribus.setLineColor("Cyan", num_box_bg)
+        # scribus.setLineWidth(0.5, num_box_bg)
+
+        # Remove the number box completely - no numbering needed
+        # num_box_height = current_row_height - 2
+        # text_y_offset = 1
+        # num_box = scribus.createText(MARGINS[0] + 2, y_offset + text_y_offset, 12, num_box_height)
+
+        # Answer text box - ensure it stays within margins
+        text_start_x = MARGINS[0] + 2
+        text_end_x = MARGINS[0] + quiz_width - 40  # Leave space for V/F boxes (38 + 2 margin)
+        text_width = text_end_x - text_start_x
+        text_box_bg = scribus.createRect(text_start_x, current_quiz_y, text_width, current_row_height - 1)
+
+        # Alternate row colors like copy6.py
+        if idx % 2 == 0:
+            scribus.setFillColor("White", text_box_bg)
+        else:
+            try:
+                scribus.defineColor("VeryLightCyan", 245, 252, 255)
+                scribus.setFillColor("VeryLightCyan", text_box_bg)
+            except:
+                scribus.setFillColor("LightGray", text_box_bg)
+        scribus.setLineColor("Cyan", text_box_bg)
+        scribus.setLineWidth(0.5, text_box_bg)
+
+        # Question text frame - adjusted positioning to remove numbering space
+        q_frame = scribus.createText(text_start_x + 2, current_quiz_y + 1, text_width - 4, current_row_height - 2)
+        scribus.setText(formatted_question, q_frame)
+        try:
+            scribus.setFont(QUIZ_ACTUAL_FONT, q_frame)
+        except:
+            try:
+                scribus.setFont(DEFAULT_FONT, q_frame)
+            except:
+                # If both fail, try first available font
+                try:
+                    available_fonts = scribus.getFontNames()
+                    if available_fonts:
+                        scribus.setFont(available_fonts[0], q_frame)
+                except:
+                    pass
+        # Set the correct font size to match actual quiz text (matching dopy.py)
+        try:
+            scribus.setFontSize(9, q_frame)
+        except:
+            pass
+        scribus.setTextColor("Black", q_frame)
+
+        # Enable proper text alignment and centering like dopy.py
+        try:
+            scribus.setTextDistances(0, 0, 0, 0, q_frame)  # No padding for perfect centering like V/F boxes
+            # Set line spacing based on row height - increased for better readability
+            if current_row_height > 14:
+                scribus.setLineSpacing(9, q_frame)  # Increased spacing for multi-line
+            else:
+                scribus.setLineSpacing(8, q_frame)  # Increased spacing for single line
+
+            # Set horizontal alignment
+            scribus.setTextAlignment(0, q_frame)  # Left align
+
+            # Try to set vertical alignment to middle like dopy.py
+            try:
+                scribus.setTextVerticalAlignment(1, q_frame)  # 1 = middle alignment
+            except:
+                try:
+                    # Alternative method for vertical centering from dopy.py
+                    scribus.setTextBehaviour(q_frame, 1)  # Try different behavior
+                except:
+                    pass
+
+            # Force text to stay within bounds - comprehensive dopy.py approach
+            try:
+                scribus.setTextBehaviour(q_frame, 0)  # Force text in frame
+            except:
+                pass
+
+            # Additional overflow protection from dopy.py
+            try:
+                scribus.setTextToFrameOverflow(q_frame, False)  # Disable overflow
+            except:
+                pass
+
+            # Enable text wrapping like dopy.py
+            try:
+                scribus.setTextFlowMode(q_frame, 0)  # Enable text flow
+            except:
+                pass
+        except:
+            pass
+
+        # Define checkbox colors if they don't exist
+        try:
+            scribus.defineColor("CheckBoxColor", 240, 255, 240)  # Light green tint for V
+            scribus.defineColor("CheckBoxColor2", 255, 240, 240)  # Light red tint for F
+        except:
+            pass
+
+        # V checkbox box - adjusted position since no number box
+        v_box_bg = scribus.createRect(MARGINS[0] + quiz_width - 38, current_quiz_y, 18, current_row_height - 1)
+        try:
+            scribus.setFillColor("CheckBoxColor", v_box_bg)
+        except:
+            scribus.setFillColor("White", v_box_bg)
+        scribus.setLineColor("Cyan", v_box_bg)
+        scribus.setLineWidth(0.5, v_box_bg)
+
+        # V checkbox text - adjusted position
+        checkbox_box_height = current_row_height - 2  # Use almost full row height with 1pt padding
+        checkbox_y_offset = 1  # Minimal top padding
+        v_box = scribus.createText(MARGINS[0] + quiz_width - 38, current_quiz_y + checkbox_y_offset, 18, checkbox_box_height)
+        scribus.setText("V", v_box)
+        try:
+            scribus.setFont(QUIZ_ACTUAL_FONT, v_box)
+        except:
+            try:
+                scribus.setFont(DEFAULT_FONT, v_box)
+            except:
+                try:
+                    available_fonts = scribus.getFontNames()
+                    if available_fonts:
+                        scribus.setFont(available_fonts[0], v_box)
+                except:
+                    pass
+        scribus.setFontSize(10, v_box)  # Increased V/F box font size (matching dopy.py)
+        scribus.setTextAlignment(1, v_box)  # Center align horizontally
+
+        # Try to set vertical alignment to middle like dopy.py
+        try:
+            scribus.setTextVerticalAlignment(1, v_box)  # 1 = middle alignment
+        except:
+            pass
+        # Set proper text distances for centering
+        scribus.setTextDistances(0, 0, 0, 0, v_box)  # No padding for perfect centering
+
+        # Set V box color based on correctness - cyan if true answer
+        if is_true:
+            scribus.setTextColor("Cyan", v_box)
+        else:
+            scribus.setTextColor("Black", v_box)
+
+        # F checkbox box - adjusted position
+        f_box_bg = scribus.createRect(MARGINS[0] + quiz_width - 18, current_quiz_y, 18, current_row_height - 1)
+        try:
+            scribus.setFillColor("CheckBoxColor2", f_box_bg)
+        except:
+            scribus.setFillColor("White", f_box_bg)
+        scribus.setLineColor("Cyan", f_box_bg)
+        scribus.setLineWidth(0.5, f_box_bg)
+
+        # F checkbox text - adjusted position
+        f_box = scribus.createText(MARGINS[0] + quiz_width - 18, current_quiz_y + checkbox_y_offset, 18, checkbox_box_height)
+        scribus.setText("F", f_box)
+        try:
+            scribus.setFont(QUIZ_ACTUAL_FONT, f_box)
+        except:
+            try:
+                scribus.setFont(DEFAULT_FONT, f_box)
+            except:
+                try:
+                    available_fonts = scribus.getFontNames()
+                    if available_fonts:
+                        scribus.setFont(available_fonts[0], f_box)
+                except:
+                    pass
+        scribus.setFontSize(10, f_box)  # Increased V/F box font size (matching dopy.py)
+        scribus.setTextAlignment(1, f_box)  # Center align horizontally
+
+        # Try to set vertical alignment to middle like dopy.py
+        try:
+            scribus.setTextVerticalAlignment(1, f_box)  # 1 = middle alignment
+        except:
+            pass
+        # Set proper text distances for centering
+        scribus.setTextDistances(0, 0, 0, 0, f_box)  # No padding for perfect centering
+
+        # Set F box color based on correctness - cyan if false answer
+        if not is_true:
+            scribus.setTextColor("Cyan", f_box)
+        else:
+            scribus.setTextColor("Black", f_box)
+
+        # Simple boundary enforcement for quiz elements
+        simple_constrain_element(q_frame)
+        simple_constrain_element(text_box_bg)
+
+        # Move to next row - simple approach like dopy.py
+        y_offset += current_row_height
+        enforce_margin_boundary()
+
+    # No additional spacing after quiz section - questions should be compact
+
+    # Ensure no overlaps after quiz placement
+    ensure_no_overlaps()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ─────────── OTHER FUNCTIONS ────────────
+# ────────────────────────────────────────────────────────────────────────────────
+
+def measure_quiz_group_height(group, group_image, base_path):
+    # This function mimics the height calculation logic in place_quiz, but does not place anything.
+    global y_offset  # Declare global variable
+    quiz_header_height = 22  # Match the safe header height
+    card_spacing = 1  # Minimal spacing between cards
+    answer_box_width = 25
+    answer_box_height = 16
+    quiz_width = PAGE_WIDTH - MARGINS[0] - MARGINS[2]
+    answer_box_gap = 4
+    quiz_bar_height = 14  # Match the safe row height
+    padding_top = 1  # Minimal safe padding
+    padding_bottom = 1  # Minimal safe padding
+    image_height = 28  # Safe image height
+    img_margin = 6
+    image_gap = 8
+    img_w = 0
+    img_h = 0
+    img_path = None
+    if group_image:
+        img_path = os.path.join(base_path, group_image) if base_path else group_image
+        orig_w, orig_h = get_image_size(img_path)
+        scale = float(image_height) / float(orig_h) if orig_h else 1.0
+        img_w = orig_w * scale
+        img_h = image_height
+    answer_boxes_total_width = (2 * answer_box_width) + answer_box_gap
+    question_width = quiz_width - (img_margin + (img_w + image_gap if img_path else 0)) - answer_boxes_total_width - 10
+    question_heights = []
+    for qa in group:
+        question = qa.get('que', '')
+        formatted_question = handle_superscripts(question)
+        temp_frame = scribus.createText(0, 0, question_width, 40)
+        scribus.setText(formatted_question, temp_frame)
+        try:
+            scribus.setFont(QUIZ_ACTUAL_FONT, temp_frame)
+        except:
+            try:
+                scribus.setFont(DEFAULT_FONT, temp_frame)
+            except:
+                # If both fail, try first available font
+                try:
+                    available_fonts = scribus.getFontNames()
+                    if available_fonts:
+                        scribus.setFont(available_fonts[0], temp_frame)
+                except:
+                    pass
+        # Set the correct font size to match actual quiz text
+        try:
+            scribus.setFontSize(8, temp_frame)
+        except:
+            pass
+        scribus.setTextColor("Black", temp_frame)
+        # Measure the required height
+        try:
+            required_height = max(scribus.getFrameText(temp_frame).count('\n') + 1, 1) * 9  # 9pt line height
+        except:
+            required_height = quiz_bar_height
+        question_heights.append(max(required_height, quiz_bar_height))
+        scribus.deleteObject(temp_frame)
+
+    # Calculate total height
+    total_question_height = sum(question_heights) + (len(question_heights) - 1) * card_spacing
+    image_height_contribution = img_h if img_path else 0
+    card_height = max(total_question_height, image_height_contribution) + padding_top + padding_bottom
+    card_top_margin = 1
+
+    # Add space for the heading (QUIZ bar)
+    total_height = (quiz_bar_height + 1) + card_height + card_top_margin + 1
+    return total_height
+
+def process_template(tmpl, base_path):
+    global y_offset, CURRENT_COLOR, global_template_count
+    # Check if we have enough space for at least the template header (with page number buffer)
+    # If not, start a new page
+    safe_boundary = PAGE_HEIGHT - MARGINS[3] - 22  # Page number buffer
+    if y_offset + 10 > safe_boundary:
+        new_page()
+    else:
+        # Add spacing between templates only if we're not at the top of a page
+        if y_offset > MARGINS[1]:
+            y_offset += TEMPLATE_TO_TEMPLATE_SPACING
+            enforce_margin_boundary()
 
         # Set fixed line spacing for consistent measurement (documentation-based approach)
         try:
@@ -2103,381 +2593,6 @@ def place_quiz(arr, in_template=True, group_image=None, base_path=None):
             if not column_mgr.enabled:
                 y_offset = MARGINS[1] + BLOCK_SPACING  # Use standard block spacing at top of new page
 
-# ────────────────────────────────────────────────────────────────────────────────
-# ─────────── QUIZ PLACEMENT FUNCTIONS ────────────
-# ────────────────────────────────────────────────────────────────────────────────
-def strip_html_tags(text):
-    """Remove all HTML tags from a string."""
-    if not text or not isinstance(text, str):
-        return text
-    return re.sub(r'<[^>]+>', '', text)
-
-def place_quiz(arr, in_template=True, group_image=None, base_path=None):
-    global y_offset, CURRENT_COLOR, column_mgr
-    global quiz_heading_placed_on_page
-
-    # Enable quiz mode (single column mode for quizzes)
-    column_mgr.set_quiz_mode(True)
-
-    if not PRINT_QUIZZES:
-        column_mgr.set_quiz_mode(False)  # Reset before returning
-        return
-    if not arr or not isinstance(arr, list):
-        column_mgr.set_quiz_mode(False)  # Reset before returning
-        return
-    # Filter quiz items based on QUIZ_FILTER_MODE
-    filtered_arr = []
-    for qa in arr:
-        if not isinstance(qa, dict):
-            continue
-        # Remove HTML tags from question and answer
-        if 'que' in qa:
-            qa['que'] = strip_html_tags(qa['que'])
-        if 'ans' in qa:
-            qa['ans'] = strip_html_tags(qa['ans'])
-        # Get the answer text to check if it's true (V) or false (F)
-        answer_text = qa.get('ans', '').strip()
-        is_true = qa.get('is_true', None)
-        if is_true is None:
-            if answer_text.endswith(QUIZ_TRUE_TEXT) or f'A: {QUIZ_TRUE_TEXT}' in answer_text:
-                is_true = True
-            elif answer_text.endswith(QUIZ_FALSE_TEXT) or f'A: {QUIZ_FALSE_TEXT}' in answer_text:
-                is_true = False
-            else:
-                is_true = True
-        if QUIZ_FILTER_MODE == "true_only" and not is_true:
-            continue
-        elif QUIZ_FILTER_MODE == "false_only" and is_true:
-            continue
-        qa['is_true'] = is_true
-        filtered_arr.append(qa)
-    if not filtered_arr:
-        return
-    # Copy 6 layout style from quiz_from_csv.py
-    quiz_width = PAGE_WIDTH - MARGINS[0] - MARGINS[2]
-    header_height = 24  # Reduced blue header height
-    row_height = 16  # Increased row height for larger 8pt font
-    answer_box_width = 18  # V/F box width
-    answer_box_height = 16  # V/F box height increased for 10pt font
-    answer_box_gap = 3  # Gap between V and F boxes
-    # Draw blue header like copy 6 (from quiz_from_csv.py)
-    if not quiz_heading_placed_on_page:
-        # Define colors if not exists
-        try:
-            scribus.defineColor("Cyan", 0, 160, 224)  # Blue color
-            scribus.defineColor("Yellow", 255, 255, 0)
-            scribus.defineColor("NumBoxBlue", 210, 235, 255)
-        except:
-            pass
-        
-        # Create blue header background
-        current_header_y = column_mgr.get_current_y()
-        header_bg = scribus.createRect(MARGINS[0], current_header_y, quiz_width, header_height)
-        scribus.setFillColor("Cyan", header_bg)
-        scribus.setLineColor("Cyan", header_bg)
-
-        # Quiz header text
-        header_text = scribus.createText(MARGINS[0] + 3, current_header_y + 3, quiz_width - 35, header_height - 6)
-        scribus.setText("Quiz", header_text)
-        try:
-            scribus.setFont(DEFAULT_FONT, header_text)
-        except:
-            try:
-                available_fonts = scribus.getFontNames()
-                if available_fonts:
-                    scribus.setFont(available_fonts[0], header_text)
-            except:
-                pass
-        scribus.setFontSize(10, header_text)
-        scribus.setTextColor("White", header_text)
-        scribus.setTextAlignment(0, header_text)
-        
-        # Configure header text wrapping and overflow control like copy6.py
-        try:
-            scribus.setTextDistances(1, 1, 1, 1, header_text)  # Minimal padding
-            scribus.setLineSpacing(10, header_text)  # Adjusted line spacing for 10pt font
-            
-            # Force text to fit within frame bounds - prevent header overflow  
-            try:
-                scribus.setTextBehaviour(header_text, 0)  # Force text to stay in frame
-            except:
-                try:
-                    scribus.setTextToFrameOverflow(header_text, False)  # Disable overflow
-                except:
-                    pass
-            
-            # Enable text wrapping for headers
-            try:
-                scribus.setTextFlowMode(header_text, 0)  # Enable text flow
-            except:
-                pass
-                
-        except:
-            pass
-        
-        # Yellow page number box (optional)
-        id_width = 30
-        current_header_y = column_mgr.get_current_y()
-        id_bg = scribus.createRect(MARGINS[0] + quiz_width - id_width, current_header_y, id_width, header_height)
-        scribus.setFillColor("Yellow", id_bg)
-        scribus.setLineColor("Black", id_bg)
-        
-        quiz_heading_placed_on_page = True
-        new_y = column_mgr.get_current_y() + header_height + 1  # Minimal gap after header
-        column_mgr.set_current_y(new_y)
-        enforce_margin_boundary()
-    # Add the exact text overflow function from quiz_from_csv.py
-    def check_text_overflow(text, width, font_size, default_height, is_header=False):
-        """Check if text will overflow and calculate required height if needed"""
-        # More conservative estimation to ensure no overflow
-        if is_header:
-            # Headers: more conservative estimate
-            chars_per_line = width / (font_size * 0.45)
-        else:
-            # Regular text: use copy6.py original values
-            chars_per_line = width / (font_size * 0.42)  # Copy6.py original value
-        
-        # Check if text truly needs multiple lines
-        # Use copy6.py original threshold
-        if len(text) <= chars_per_line * 0.85:  # Copy6.py original 85% threshold
-            return default_height  # Single line - use compact height
-        
-        # Calculate actual lines needed
-        lines_needed = int(len(text) / chars_per_line) + 1
-        
-        # Special handling for borderline cases (text near one line) - copy6.py original
-        if len(text) > chars_per_line * 0.85 and len(text) <= chars_per_line * 1.2:
-            # Text is close to or slightly over one line - copy6.py original
-            return default_height * 1.5  # Copy6.py original 50% more height
-        
-        # Calculate required height for true multi-line content - reduced for compact spacing
-        line_height = font_size * 1.2  # Reduced line height for more compact layout
-        calculated_height = lines_needed * line_height + 4  # Reduced padding for line spacing
-
-        # Add minimal buffer for safety - reduced from original
-        calculated_height = calculated_height * 1.05  # Reduced from 10% to 5% buffer
-        
-        # Return calculated height
-        return max(default_height, calculated_height)
-    
-    # Process each question as a table row (from quiz_from_csv.py)
-    for idx, qa in enumerate(filtered_arr):
-        # Get current quiz Y position at the start of each quiz item
-        current_quiz_y = column_mgr.get_current_y()
-
-        question = qa.get('que', '')
-        is_true = qa.get('is_true', False)
-
-        # Keep it very simple - just remove HTML tags and show plain text
-        formatted_question = re.sub(r'<[^>]+>', '', question)
-        cleaned_question_for_calc = formatted_question
-        
-        # Apply superscript conversion for height calculation too
-        display_question_for_calc = re.sub(r'cm(\d)', lambda m: 'cm' + {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'}[m.group(1)], cleaned_question_for_calc)
-        
-        # Calculate row height using corrected text width (matches the fixed positioning)
-        text_width = quiz_width - 42  # Adjusted to match the new text box positioning
-        current_row_height = check_text_overflow(display_question_for_calc, text_width, 8, row_height, is_header=False)
-        
-        # Simple boundary check
-        simple_boundary_check(current_row_height)
-        
-        # Draw answer row exactly like copy 6 (from quiz_from_csv.py)
-        # Remove number box background - no numbering needed
-        # num_box_bg = scribus.createRect(MARGINS[0] + 2, y_offset, 12, current_row_height - 1)
-        # scribus.setFillColor("NumBoxBlue", num_box_bg)
-        # scribus.setLineColor("Cyan", num_box_bg)
-        # scribus.setLineWidth(0.5, num_box_bg)
-        
-        # Remove the number box completely - no numbering needed
-        # num_box_height = current_row_height - 2
-        # text_y_offset = 1
-        # num_box = scribus.createText(MARGINS[0] + 2, y_offset + text_y_offset, 12, num_box_height)
-        # scribus.setText("", num_box)  # Empty - no numbers
-        # No number box needed - removed completely
-        # try:
-        #     scribus.setFont(DEFAULT_FONT, num_box)
-        # except:
-        #     pass
-        # scribus.setFontSize(6, num_box)
-        # scribus.setTextAlignment(1, num_box)
-        # scribus.setTextVerticalAlignment(1, num_box)
-        # scribus.setTextDistances(0, 0, 0, 0, num_box)
-        # scribus.setTextColor("Black", num_box)
-        
-        # Answer text box - ensure it stays within margins
-        text_start_x = MARGINS[0] + 2
-        text_end_x = MARGINS[0] + quiz_width - 40  # Leave space for V/F boxes (38 + 2 margin)
-        text_width = text_end_x - text_start_x
-        text_box_bg = scribus.createRect(text_start_x, current_quiz_y, text_width, current_row_height - 1)
-        
-        # Alternate row colors like copy6.py
-        if idx % 2 == 0:
-            scribus.setFillColor("White", text_box_bg)
-        else:
-            try:
-                scribus.defineColor("VeryLightCyan", 245, 252, 255)
-                scribus.setFillColor("VeryLightCyan", text_box_bg)
-            except:
-                scribus.setFillColor("LightGray", text_box_bg)
-        
-        scribus.setLineColor("Cyan", text_box_bg)
-        scribus.setLineWidth(0.5, text_box_bg)
-        
-        # Answer text - properly centered vertically and horizontally like copy6.py
-        text_box_height = current_row_height - 2  # Use almost full row height with 1pt padding top/bottom
-        text_y_offset_answer = 1  # Minimal top padding
-        q_frame = scribus.createText(text_start_x + 1, current_quiz_y + text_y_offset_answer, text_width - 2, text_box_height)
-        
-        # Use the same converted text for display as we used for height calculation
-        display_question = display_question_for_calc
-        scribus.setText(display_question, q_frame)
-
-        # Use quiz font
-        try:
-            scribus.setFont(QUIZ_ACTUAL_FONT, q_frame)
-            scribus.setFontSize(QUIZ_QUESTION_FONT_SIZE, q_frame)
-        except:
-            try:
-                scribus.setFont(DEFAULT_FONT, q_frame)
-                scribus.setFontSize(QUIZ_QUESTION_FONT_SIZE, q_frame)
-            except:
-                pass
-
-        # Apply universal overflow handling to quiz questions
-        q_frame = column_mgr._handle_text_overflow(q_frame, QUIZ_QUESTION_FONT_SIZE)
-        scribus.setTextColor("Black", q_frame)
-        # Enable proper text alignment and centering like copy6.py
-        try:
-            scribus.setTextDistances(0, 0, 0, 0, q_frame)  # No padding for perfect centering like V/F boxes
-            # Set line spacing based on row height - increased for better readability
-            if current_row_height > 14:
-                scribus.setLineSpacing(9, q_frame)  # Increased spacing for multi-line
-            else:
-                scribus.setLineSpacing(8, q_frame)  # Increased spacing for single line
-            
-            # Set horizontal alignment
-            scribus.setTextAlignment(0, q_frame)  # Left align
-            
-            # Try to set vertical alignment to middle like copy6.py
-            try:
-                scribus.setTextVerticalAlignment(1, q_frame)  # 1 = middle alignment
-            except:
-                try:
-                    # Alternative method for vertical centering from copy6.py
-                    scribus.setTextBehaviour(q_frame, 1)  # Try different behavior
-                except:
-                    pass
-            
-            # Force text to stay within bounds - comprehensive copy6.py approach
-            try:
-                scribus.setTextBehaviour(q_frame, 0)  # Force text in frame
-            except:
-                pass
-            
-            # Additional overflow protection from copy6.py
-            try:
-                scribus.setTextToFrameOverflow(q_frame, False)  # Disable overflow
-            except:
-                pass
-            
-            # Enable text wrapping like copy6.py
-            try:
-                scribus.setTextFlowMode(q_frame, 0)  # Enable text flow
-            except:
-                pass
-        except:
-            pass
-        # V/F checkboxes exactly from copy6.py
-        # Define checkbox colors from copy6.py
-        try:
-            scribus.defineColor("CheckBoxColor", 240, 255, 240)  # Light green tint for V
-            scribus.defineColor("CheckBoxColor2", 255, 240, 240)  # Light red tint for F
-        except:
-            pass
-        
-        # V checkbox box - adjusted position since no number box
-        v_box_bg = scribus.createRect(MARGINS[0] + quiz_width - 38, current_quiz_y, 18, current_row_height - 1)
-        try:
-            scribus.setFillColor("CheckBoxColor", v_box_bg)
-        except:
-            scribus.setFillColor("White", v_box_bg)
-        scribus.setLineColor("Cyan", v_box_bg)
-        scribus.setLineWidth(0.5, v_box_bg)
-        
-        # V checkbox text - adjusted position
-        checkbox_box_height = current_row_height - 2  # Use almost full row height with 1pt padding
-        checkbox_y_offset = 1  # Minimal top padding
-        v_box = scribus.createText(MARGINS[0] + quiz_width - 38, current_quiz_y + checkbox_y_offset, 18, checkbox_box_height)
-        scribus.setText("V", v_box)
-        try:
-            scribus.setFontSize(10, v_box)  # Increased V/F box font size
-            scribus.setTextAlignment(1, v_box)  # Center align horizontally
-            # Try to set vertical alignment to middle
-            try:
-                scribus.setTextVerticalAlignment(1, v_box)  # 1 = middle alignment
-            except:
-                pass
-            # Set proper text distances for centering
-            scribus.setTextDistances(0, 0, 0, 0, v_box)  # No padding for perfect centering
-        except:
-            pass
-        # Color V with header color if it's the correct answer (from copy6.py)
-        if is_true:
-            scribus.setTextColor("Cyan", v_box)
-        else:
-            scribus.setTextColor("Black", v_box)
-        
-        # F checkbox box - adjusted position
-        f_box_bg = scribus.createRect(MARGINS[0] + quiz_width - 18, current_quiz_y, 18, current_row_height - 1)
-        try:
-            scribus.setFillColor("CheckBoxColor2", f_box_bg)
-        except:
-            scribus.setFillColor("White", f_box_bg)
-        scribus.setLineColor("Cyan", f_box_bg)
-        scribus.setLineWidth(0.5, f_box_bg)
-        
-        # F checkbox text - adjusted position
-        f_box = scribus.createText(MARGINS[0] + quiz_width - 18, current_quiz_y + checkbox_y_offset, 18, checkbox_box_height)
-        scribus.setText("F", f_box)
-        try:
-            scribus.setFontSize(10, f_box)  # Increased V/F box font size
-            scribus.setTextAlignment(1, f_box)  # Center align horizontally
-            # Try to set vertical alignment to middle
-            try:
-                scribus.setTextVerticalAlignment(1, f_box)  # 1 = middle alignment
-            except:
-                pass
-            # Set proper text distances for centering
-            scribus.setTextDistances(0, 0, 0, 0, f_box)  # No padding for perfect centering
-        except:
-            pass
-        # Color F with header color if it's the correct answer (from copy6.py)
-        if not is_true:  # F is correct when is_true is False
-            scribus.setTextColor("Cyan", f_box)
-        else:
-            scribus.setTextColor("Black", f_box)
-        
-        # Simple boundary enforcement for quiz elements
-        simple_constrain_element(q_frame)
-        simple_constrain_element(text_box_bg)
-        
-        # Move to next row
-        new_y = column_mgr.get_current_y() + current_row_height
-        column_mgr.set_current_y(new_y)
-        enforce_margin_boundary()
-
-    # Add minimal spacing after quiz section only if space permits (with page number buffer)
-    safe_boundary = PAGE_HEIGHT - MARGINS[3] - 22  # Page number buffer
-    current_y = column_mgr.get_current_y()
-    if current_y + 1 < safe_boundary:
-        column_mgr.set_current_y(current_y + 1)  # Minimal gap after quiz section
-
-    # Disable quiz mode after quiz is complete
-    column_mgr.set_quiz_mode(False)
-
-    # Ensure no overlaps after quiz placement
-    ensure_no_overlaps()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # ─────────── TEMPLATE PROCESSING ────────────
@@ -2645,76 +2760,6 @@ def place_images_grid(images, base_path, start_y, max_height=None, max_images=No
     return current_y
 
 # Place these two functions before process_template
-def measure_quiz_group_height(group, group_image, base_path):
-    # This function mimics the height calculation logic in place_quiz, but does not place anything.
-    global y_offset  # Declare global variable
-    quiz_header_height = 34
-    card_spacing = 1  # Minimal spacing between cards
-    answer_box_width = 25
-    answer_box_height = 16
-    quiz_width = PAGE_WIDTH - MARGINS[0] - MARGINS[2]
-    answer_box_gap = 4
-    quiz_bar_height = 26
-    padding_top = 1  # Minimal padding
-    padding_bottom = 1  # Minimal padding
-    image_height = 32
-    img_margin = 6
-    image_gap = 8
-    img_w = 0
-    img_h = 0
-    img_path = None
-    if group_image:
-        img_path = os.path.join(base_path, group_image) if base_path else group_image
-        orig_w, orig_h = get_image_size(img_path)
-        scale = float(image_height) / float(orig_h) if orig_h else 1.0
-        img_w = orig_w * scale
-        img_h = image_height
-    answer_boxes_total_width = (2 * answer_box_width) + answer_box_gap
-    question_width = quiz_width - (img_margin + (img_w + image_gap if img_path else 0)) - answer_boxes_total_width - 10
-    question_heights = []
-    for qa in group:
-        question = qa.get('que', '')
-        formatted_question = handle_superscripts(question)
-        temp_frame = scribus.createText(0, 0, question_width, 40)
-        scribus.setText(formatted_question, temp_frame)
-        try:
-            scribus.setFont(QUIZ_ACTUAL_FONT, temp_frame)
-        except:
-            try:
-                scribus.setFont(DEFAULT_FONT, temp_frame)
-            except:
-                # If both fail, try first available font
-                try:
-                    available_fonts = scribus.getFontNames()
-                    if available_fonts:
-                        scribus.setFont(available_fonts[0], temp_frame)
-                except:
-                    pass
-        # Set the correct font size to match actual quiz text
-        try:
-            scribus.setFontSize(8, temp_frame)
-        except:
-            pass
-        while scribus.textOverflows(temp_frame):
-            w, h = scribus.getSize(temp_frame)
-            scribus.sizeObject(w, h + 10, temp_frame)
-        q_height = scribus.getSize(temp_frame)[1]
-        scribus.deleteObject(temp_frame)
-        question_heights.append(q_height)
-    # Match copy 6's content padding
-    card_top_margin = 2  # Minimal space before each quiz item
-    padding_top = 1  # Minimal padding
-    padding_bottom = 1  # Minimal padding
-    
-    # Instead of modifying y_offset directly, include its value in the calculation
-    
-    # Card height calculation
-    total_questions_height = sum([h + padding_top + padding_bottom for h in question_heights]) + (card_spacing * (len(group)-1))
-    card_height = max(answer_box_height + padding_top + padding_bottom, total_questions_height, img_h + padding_top + padding_bottom)
-    
-    # Add space for the heading (QUIZ bar)
-    total_height = (quiz_bar_height + 1) + card_height + card_top_margin + 1
-    return total_height
 
 def group_quiz_by_image(quiz_entries):
     """
@@ -2729,33 +2774,6 @@ def group_quiz_by_image(quiz_entries):
     # This maintains the expected structure while allowing future image-based grouping
     return {None: quiz_entries}
 
-def place_quiz_group_paginated(group, group_image, base_path):
-    global y_offset
-    if not group:
-        return
-    idx = 0
-    n = len(group)
-    while idx < n:
-        # Try to fit as many questions as possible on this page
-        best_end = idx + 1
-        for end in range(n, idx, -1):
-            height_needed = measure_quiz_group_height(group[idx:end], group_image, base_path)
-            reduced_gap = 30
-            available = PAGE_HEIGHT - y_offset - MARGINS[3] - 25  # Page number buffer
-            if y_offset > MARGINS[1]:
-                height_needed -= reduced_gap
-            if height_needed <= available:
-                best_end = end
-                break
-        # Avoid leaving a single question alone at the top of a page (unless group is size 1)
-        if best_end == idx + 1 and (n - idx) > 1:
-            # Not enough space for more than one, so move at least two to next page
-            new_page()
-            continue
-        place_quiz(group[idx:best_end], True, group_image, base_path)
-        idx = best_end
-        if idx < n:
-            new_page()
 
 def process_template(tmpl, base_path):
     global y_offset, CURRENT_COLOR, global_template_count
@@ -2765,9 +2783,9 @@ def process_template(tmpl, base_path):
     if y_offset + 10 > safe_boundary:
         new_page()
     else:
-        # Add padding before the template only if we're not at the top of a page
+        # Add spacing between templates only if we're not at the top of a page
         if y_offset > MARGINS[1]:
-            y_offset += TEMPLATE_PADDING / 2  # Use half the normal padding
+            y_offset += TEMPLATE_TO_TEMPLATE_SPACING
             enforce_margin_boundary()
     
     # Set color based on template ID (for text styling, but no background)
@@ -2804,9 +2822,14 @@ def process_template(tmpl, base_path):
         aid = 0
     template_alignment = alignments[aid]
     
-    # Place text and road signs
-    if cleaned_txt or rs:
-        place_wrapped_text_and_images(cleaned_txt, rs, base_path, MODULE_TEXT_FONT_SIZE, True, template_alignment)
+    # Place text using regular template style
+    if cleaned_txt:
+        # Always use regular template text placement for consistency
+        place_wrapped_text_and_images(cleaned_txt, None, base_path, MODULE_TEXT_FONT_SIZE, True, template_alignment)
+
+    # If we have road signs, place them on the right side with bounding boxes
+    if rs:
+        place_roadsigns_on_right(rs, base_path)
     
     # Place videos
     for v in tmpl.get("videos", []):
@@ -2957,10 +2980,13 @@ def process_template(tmpl, base_path):
     
     # Place quiz section using global constants - only if quizzes are enabled
     if "quiz" in tmpl and PRINT_QUIZZES:
-        # Reset quiz header flag for this template - allow ONE header per template
+        # Reset quiz header flag for this template - allow ONE header per template (matching dopy.py)
         global quiz_heading_placed_on_page
         quiz_heading_placed_on_page = False
-        
+
+        # Synchronize y_offset with column_mgr before quiz placement
+        y_offset = column_mgr.get_current_y()
+
         # Get all quiz entries for this template and place under single header
         quiz_entries = tmpl.get("quiz", [])
         if quiz_entries:
@@ -2972,6 +2998,9 @@ def process_template(tmpl, base_path):
             else:
                 # Template has no images - group quiz entries together without image
                 place_quiz(quiz_entries, True, None, base_path)
+
+        # Synchronize column_mgr with y_offset after quiz placement
+        column_mgr.set_current_y(y_offset)
     
     # Ultra-minimal spacing between templates (with page number buffer)
     current_y = column_mgr.get_current_y()
@@ -3175,14 +3204,14 @@ def handle_superscripts(text):
     # Handle text followed by S-T span (e.g., "cm<span class="S-T18">3</span>") - FIRST
     # For quiz questions, convert to simple format that apply_quiz_superscripts can handle
     text = re.sub(
-        r'([a-zA-Z]+)<span\s+class=(?:["\']|\\")S-T[^"\'>]*(?:["\']|\\")(?:\s*[^>]*)?>(\d+)</span>',
+        r'([a-zA-Z]+)<span\s+class=(?:["\']|\")S-T[^"\'>]*(?:["\']|\")(?:\s*[^>]*)?>(\d+)</span>',
         lambda m: m.group(1) + '<sup>' + m.group(2) + '</sup>',
         text
     )
     
     # Also handle the simple case - convert to <sup> format
     text = re.sub(
-        r'<span\s+class=(?:["\']|\\")S-T[^"\'>]*(?:["\']|\\")(?:\s*[^>]*)?>(\d+)</span>',
+        r'<span\s+class=(?:["\']|\")S-T[^"\'>]*(?:["\']|\")(?:\s*[^>]*)?>(\d+)</span>',
         lambda m: '<sup>' + m.group(1) + '</sup>',
         text
     )
@@ -3389,8 +3418,7 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding):
                 scribus.sizeObject(text_width, scribus.getSize(text_frame)[1], text_frame)
         except:
             pass
-    # Smart spacing: template headers get almost no gap, regular headers get minimal gap
-    spacing_after = 0 if is_template_header else RELATED_ELEMENT_SPACING
+    spacing_after = BLOCK_SPACING
     y_offset += text_h + spacing_after
     
     # Simple final constraint
@@ -3409,11 +3437,11 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding):
 def create_module_header(module_name):
     """Create a module header with the configured style."""
     return create_styled_header(
-        module_name, 
-        MODULE_FONT_SIZE, 
-        MODULE_BOLD, 
-        MODULE_BG_COLOR, 
-        MODULE_TEXT_COLOR, 
+        module_name,
+        MODULE_FONT_SIZE,
+        MODULE_BOLD,
+        MODULE_BG_COLOR,
+        MODULE_TEXT_COLOR,
         MODULE_PADDING
     )
 
@@ -3732,38 +3760,49 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
             break
             
         create_styled_header(f"{area.get('name','Unnamed')}", 11, True, "None", "Black", 5)
-        # Area description follows area header - hierarchical 2px gap
+        # Area description
         desc_text = area.get("desc","")
         if desc_text:
-            # After description, next element (chapter) needs 5px gap
-            place_text_block_flow(desc_text, AREA_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=UNRELATED_ELEMENT_SPACING)
+            place_text_block_flow(desc_text, AREA_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=HEADER_TO_DESC_SPACING)
 
-        for chap in area.get("chapters", []):
+        chapter_list = area.get("chapters", [])
+        for chap_index, chap in enumerate(chapter_list):
             if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
                 break
 
+            # Add spacing between chapters (but not before first chapter)
+            if chap_index > 0:
+                y_offset += SECTION_TO_SECTION_SPACING
+
             create_styled_header(f"{chap.get('name','Unnamed')}", 11, True, "None", "Black", 5)
 
-            for topic in chap.get("topics", []):
+            topic_list = chap.get("topics", [])
+            for topic_index, topic in enumerate(topic_list):
                 if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
                     break
+
+                # Add spacing between topics (but not before first topic)
+                if topic_index > 0:
+                    y_offset += SECTION_TO_SECTION_SPACING
 
                 # Clear previous topic banner and set new one
                 current_topic_text = topic.get('name', 'Unnamed')
                 create_topic_header(current_topic_text)
                 add_vertical_topic_banner(current_topic_text)
 
-                # Topic description follows topic header (2px), but needs gap for next element (5px after)
+                # Topic description
                 desc_text = topic.get("desc","")
                 if desc_text:
-                    place_text_block_flow(desc_text, TOPIC_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=UNRELATED_ELEMENT_SPACING)
+                    place_text_block_flow(desc_text, TOPIC_DESC_FONT_SIZE, balanced_columns=True, custom_spacing=HEADER_TO_DESC_SPACING)
                 
                 for mod in topic.get("modules", []):
                     if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
                         break
                         
                     create_module_header(mod.get('name','Unnamed'))
-                    
+                    # Add minimal spacing between module name and template content
+                    y_offset += MODULE_TO_TEMPLATE_SPACING
+
                     for tmpl in mod.get("templates", []):
                         if global_template_count >= GLOBAL_TEMPLATE_LIMIT:
                             break
