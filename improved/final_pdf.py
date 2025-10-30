@@ -20,6 +20,10 @@ DEBUG_LOG_FILE = None  # Will be set dynamically
 OVERLAP_WARNINGS = []
 BOUNDARY_VIOLATIONS = []
 
+# Performance optimization: Disable detailed logging to improve speed
+# Set to True only when debugging specific issues
+ENABLE_DETAILED_LOGGING = False
+
 def init_logging():
     """Initialize logging system with timestamped files"""
     global DEBUG_LOG_FILE, LOG_DIR
@@ -62,7 +66,8 @@ def log_position(element_type, element_id, x, y, width, height, page_num, notes=
     """Log element position for debugging"""
     global OVERLAP_WARNINGS, BOUNDARY_VIOLATIONS
 
-    if not DEBUG_LOG_FILE:
+    # Skip logging if disabled for performance
+    if not ENABLE_DETAILED_LOGGING or not DEBUG_LOG_FILE:
         return
 
     try:
@@ -1429,7 +1434,7 @@ def place_roadsigns_grid(images, base_path, start_y, max_height=None, frame_x=No
     return current_y
 
 # ─────────── TEXT PLACEMENT FUNCTIONS ────────────
-def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False, no_bottom_gap=False, is_heading=False, balanced_columns=False, custom_spacing=None, font_family=None):
+def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False, no_bottom_gap=False, is_heading=False, balanced_columns=False, custom_spacing=None, font_family=None, has_roadsigns=False):
     """
     Place an HTML text block with flowing text and formatting.
     Uses the proven working approach with optional two-column layout for descriptions.
@@ -1511,8 +1516,8 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
         best_split_idx = mid_word
         best_height_diff = float('inf')
 
-        # Search range: +/- 30% of total words for optimal balance
-        search_range = max(5, int(total_words * 0.3))
+        # Search range: +/- 10% of total words for optimal balance (reduced from 30% for performance)
+        search_range = max(5, min(int(total_words * 0.1), 30))  # Cap at 30 iterations max
 
         for test_split_idx in range(max(1, mid_word - search_range), min(total_words, mid_word + search_range + 1)):
             # Build plain text for height measurement
@@ -1532,6 +1537,10 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
             if height_diff < best_height_diff:
                 best_height_diff = height_diff
                 best_split_idx = test_split_idx
+
+                # Early exit if columns are already well-balanced (within 5pt)
+                if best_height_diff < 5:
+                    break
 
         # Split word segments at the best split point
         left_segments = word_segments[:best_split_idx]
@@ -1688,11 +1697,21 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
             except:
                 pass
 
-            # Handle overflow for each column frame
-            while scribus.textOverflows(current_frame):
+            # Handle overflow for each column frame with adaptive expansion
+            overflow_iterations = 0
+            max_overflow_iterations = 200  # Increased safety limit
+            while scribus.textOverflows(current_frame) and overflow_iterations < max_overflow_iterations:
                 current_w, current_h = scribus.getSize(current_frame)
-                scribus.sizeObject(current_w, current_h + 3, current_frame)
+                # Adaptive increment for faster convergence
+                if overflow_iterations < 50:
+                    increment = 10
+                elif overflow_iterations < 100:
+                    increment = 5
+                else:
+                    increment = 2
+                scribus.sizeObject(current_w, current_h + increment, current_frame)
                 scribus.layoutText(current_frame)
+                overflow_iterations += 1
 
     # Apply styles for both balanced and non-balanced frames
     if balanced_columns and len(frames_to_setup) > 1:
@@ -1714,6 +1733,31 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
 
             # Apply styles to this frame
             handle_text_styles(current_frame, frame_style_segments, font_size, font_family)
+
+            # CRITICAL: Re-check overflow AFTER applying styles, as styles can cause text reflow
+            # Use adaptive expansion for faster and more reliable convergence
+            overflow_iterations = 0
+            max_overflow_iterations = 200  # Increased limit
+            while scribus.textOverflows(current_frame) and overflow_iterations < max_overflow_iterations:
+                current_w, current_h = scribus.getSize(current_frame)
+                # Adaptive increment: start large, then get smaller for fine-tuning
+                if overflow_iterations < 50:
+                    increment = 10
+                elif overflow_iterations < 100:
+                    increment = 5
+                else:
+                    increment = 2
+                scribus.sizeObject(current_w, current_h + increment, current_frame)
+                scribus.layoutText(current_frame)
+                overflow_iterations += 1
+
+                # Force redraw every 20 iterations to ensure accurate overflow detection
+                if overflow_iterations % 20 == 0:
+                    try:
+                        scribus.redrawAll()
+                    except:
+                        pass
+
     else:
         # Single frame - create style segments from normalized_segments and apply
         style_segments = []
@@ -1792,10 +1836,13 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
             scribus.layoutText(frame)
 
             # Expand minimally to ensure all text is visible - THIS IS THE KEY
-            while scribus.textOverflows(frame):
+            overflow_iterations = 0
+            max_overflow_iterations = 100  # Safety limit
+            while scribus.textOverflows(frame) and overflow_iterations < max_overflow_iterations:
                 current_w, current_h = scribus.getSize(frame)
                 scribus.sizeObject(current_w, current_h + 3, frame)
                 scribus.layoutText(frame)
+                overflow_iterations += 1
 
             # Step 2: Calculate exact height using official Scribus methods
             try:
@@ -1859,6 +1906,51 @@ def place_text_block_flow(html_text, font_size=8, bold=False, in_template=False,
             # IMPORTANT: Resize both columns to the same height for visual balance
             left_frame_width = scribus.getSize(left_frame)[0]
             right_frame_width = scribus.getSize(right_frame)[0]
+            scribus.sizeObject(left_frame_width, max_frame_height, left_frame)
+            scribus.sizeObject(right_frame_width, max_frame_height, right_frame)
+
+            # CRITICAL FIX: Final overflow check after resizing to same height
+            # Check BOTH columns one more time and expand if needed
+            for col_frame in [left_frame, right_frame]:
+                overflow_count = 0
+                # Use larger increments for faster convergence
+                while scribus.textOverflows(col_frame) and overflow_count < 200:
+                    col_w, col_h = scribus.getSize(col_frame)
+                    # Use adaptive expansion - larger increments initially, then smaller
+                    if overflow_count < 50:
+                        increment = 10  # Fast expansion initially
+                    elif overflow_count < 100:
+                        increment = 5   # Medium expansion
+                    else:
+                        increment = 2   # Fine-tuning at the end
+                    scribus.sizeObject(col_w, col_h + increment, col_frame)
+                    scribus.layoutText(col_frame)
+                    overflow_count += 1
+
+                    # Force redraw every 20 iterations for accurate detection
+                    if overflow_count % 20 == 0:
+                        try:
+                            scribus.redrawAll()
+                        except:
+                            pass
+
+            # Recalculate max height after final overflow fixes
+            left_frame_height = scribus.getSize(left_frame)[1]
+            right_frame_height = scribus.getSize(right_frame)[1]
+            max_frame_height = max(left_frame_height, right_frame_height)
+
+            # Add safety buffer ONLY for templates with roadsigns
+            # Roadsigns take up space on the right side, so text needs extra vertical space
+            if in_template and has_roadsigns:
+                # Templates with roadsigns need extra space to prevent text overflow
+                safety_buffer = 40  # Extra space for roadsign displacement
+            else:
+                # No roadsigns or not template text - minimal/no buffer
+                safety_buffer = 0
+
+            max_frame_height += safety_buffer
+
+            # Resize both to match the final max height with buffer
             scribus.sizeObject(left_frame_width, max_frame_height, left_frame)
             scribus.sizeObject(right_frame_width, max_frame_height, right_frame)
 
@@ -1933,10 +2025,12 @@ def place_roadsigns_on_right(roadsign_list, base_path, text_start_y=None):
     valid_signs = [rs for rs in roadsign_list if rs]
     num_signs = len(valid_signs)
 
-    print(f"DEBUG place_roadsigns_on_right: {num_signs} valid signs, text_start_y={text_start_y}, y_offset={y_offset}")
+    # DEBUG: Commented out for performance
+    # print(f"DEBUG place_roadsigns_on_right: {num_signs} valid signs, text_start_y={text_start_y}, y_offset={y_offset}")
 
     if num_signs == 0:
-        print("DEBUG: No valid signs, returning")
+        # DEBUG: Commented out for performance
+        # print("DEBUG: No valid signs, returning")
         return
 
     # Calculate layout for road signs on the right
@@ -1958,7 +2052,8 @@ def place_roadsigns_on_right(roadsign_list, base_path, text_start_y=None):
         safe_boundary = PAGE_HEIGHT - MARGINS[3] - 22
         if block_y > safe_boundary or block_y < MARGINS[1]:
             # Either beyond boundary or before top margin (wrapped around) - use current position
-            print(f"DEBUG: Adjusting block_y from {block_y} to {y_offset} (outside valid range)")
+            # DEBUG: Commented out for performance
+            # print(f"DEBUG: Adjusting block_y from {block_y} to {y_offset} (outside valid range)")
             block_y = y_offset
 
     # Draw overall bounding box for all road signs with text flow properties
@@ -2002,9 +2097,12 @@ def place_roadsigns_on_right(roadsign_list, base_path, text_start_y=None):
 
 
 def place_wrapped_text_and_images(text_arr, image_list, base_path,
-                                default_font_size=6, in_template=False, alignment="C", is_continuation=False, font_family=None):
+                                default_font_size=6, in_template=False, alignment="C", is_continuation=False, font_family=None, roadsigns=None):
     """Places text with images integrated inside the same container with text flow."""
     global y_offset
+
+    # Handle roadsigns parameter
+    rs = roadsigns if roadsigns else []
 
     text_arr = [str(t) for t in (text_arr or [])]
 
@@ -2068,12 +2166,16 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
 
         # Create text frame FIRST (so it's at the back)
         frame_start_y = y_offset
+
         # If this is a continuation template (same ID), suppress bottom gap to eliminate spacing
         # Use balanced_columns=True for even text distribution in both columns
-        print(f"DEBUG: Creating template text with balanced_columns=True for even distribution")
-        frame = place_text_block_flow(text, default_font_size, False, in_template, no_bottom_gap=is_continuation, balanced_columns=True, font_family=font_family)
+        # Pass roadsigns info so text frames can reserve extra space if needed
+        # DEBUG: Commented out for performance
+        # print(f"DEBUG: Creating template text with balanced_columns=True, has_roadsigns={len(rs) > 0}")
+        frame = place_text_block_flow(text, default_font_size, False, in_template, no_bottom_gap=is_continuation, balanced_columns=True, font_family=font_family, has_roadsigns=(len(rs) > 0))
 
         # If we have an image AND this is template text, extend frame to prevent text overlap
+        # NOTE: With balanced columns, 'frame' is only the LEFT frame, but we need to check BOTH frames for overflow
         if image_info and in_template and frame:
             try:
                 img_width = image_info['width']
@@ -2096,6 +2198,35 @@ def place_wrapped_text_and_images(text_arr, image_list, base_path,
                 # CRITICAL: Update y_offset to account for the extended frame
                 # Always use the new extended height since we have an image
                 scribus.layoutText(frame)
+
+                # CRITICAL FIX: For balanced columns with images, check and fix overflow in RIGHT column
+                # The image is on the left, but text can overflow on the right
+                try:
+                    # Get all text frames on current page that might be the right column
+                    all_frames = scribus.getAllObjects()
+                    current_page = scribus.currentPage()
+                    frame_y = scribus.getPosition(frame)[1]
+
+                    # Find potential right column frame (same Y position, different X)
+                    frame_x = scribus.getPosition(frame)[0]
+                    for obj_name in all_frames:
+                        try:
+                            if scribus.getObjectType(obj_name) == "TextFrame":
+                                obj_x, obj_y = scribus.getPosition(obj_name)
+                                # Check if this is roughly at the same Y but different X (right column)
+                                if abs(obj_y - frame_y) < 5 and obj_x > frame_x + 50:  # Right of main frame
+                                    # This is the right column - check for overflow with aggressive expansion
+                                    overflow_count = 0
+                                    while scribus.textOverflows(obj_name) and overflow_count < 100:
+                                        obj_w, obj_h = scribus.getSize(obj_name)
+                                        scribus.sizeObject(obj_w, obj_h + 10, obj_name)  # Increased from 5 to 10
+                                        scribus.layoutText(obj_name)
+                                        overflow_count += 1
+                        except:
+                            continue
+                except:
+                    pass
+
                 # IMPORTANT: Get actual frame Y position after potential page break
                 actual_frame_y = scribus.getPosition(frame)[1]
 
@@ -2777,10 +2908,10 @@ def process_template(tmpl, base_path, is_continuation=False, next_is_continuatio
         # This prevents double-spacing (BLOCK_SPACING + template-to-template spacing)
         suppress_spacing = True  # Always suppress for templates
 
-        # DEBUG: Print the actual font size being used
-        print(f"DEBUG: Using MODULE_TEXT_FONT_SIZE = {MODULE_TEXT_FONT_SIZE}")
+        # DEBUG: Commented out for performance
+        # print(f"DEBUG: Using MODULE_TEXT_FONT_SIZE = {MODULE_TEXT_FONT_SIZE}")
 
-        place_wrapped_text_and_images(cleaned_txt, imgs, base_path, MODULE_TEXT_FONT_SIZE, True, template_alignment, is_continuation=suppress_spacing, font_family=TEMPLATE_TEXT_FONT_FAMILY)
+        place_wrapped_text_and_images(cleaned_txt, imgs, base_path, MODULE_TEXT_FONT_SIZE, True, template_alignment, is_continuation=suppress_spacing, font_family=TEMPLATE_TEXT_FONT_FAMILY, roadsigns=rs)
 
         # Synchronize column_mgr with y_offset after template text placement
         # No forced minimum spacing - let templates use only the space they need
@@ -2788,16 +2919,17 @@ def process_template(tmpl, base_path, is_continuation=False, next_is_continuatio
 
     # If we have road signs, place them on the right side with bounding boxes
     if rs and len(rs) > 0:
-        # Debug: print which template has roadsigns
-        template_name_short = tmpl.get("text", [""])[0][:30] if tmpl.get("text") else f"Template {tid}"
-        print(f"DEBUG: Placing {len(rs)} roadsigns for template: {template_name_short}...")
+        # DEBUG: Commented out for performance
+        # template_name_short = tmpl.get("text", [""])[0][:30] if tmpl.get("text") else f"Template {tid}"
+        # print(f"DEBUG: Placing {len(rs)} roadsigns for template: {template_name_short}...")
 
         # CRITICAL: Check if we're still on the same page as when template started
         current_page = scribus.currentPage()
         if current_page != template_start_page:
             # Template text caused a page break - place roadsigns on the NEW page at top
             # Use the current page's top margin position instead of old page position
-            print(f"DEBUG: Template crossed pages ({template_start_page} -> {current_page}), placing roadsigns at top of new page")
+            # DEBUG: Commented out for performance
+            # print(f"DEBUG: Template crossed pages ({template_start_page} -> {current_page}), placing roadsigns at top of new page")
             # Use top of current page as roadsign position
             roadsign_y_position = MARGINS[1]  # Top margin of new page
             place_roadsigns_on_right(rs, base_path, roadsign_y_position)
@@ -2881,28 +3013,34 @@ def process_template(tmpl, base_path, is_continuation=False, next_is_continuatio
 # ────────────────────────────────────────────────────────────────────────────────
 # ─────────── VERTICAL TOPIC BANNER FUNCTIONS ────────────
 # ────────────────────────────────────────────────────────────────────────────────
-def add_vertical_topic_banner(topic_name):
+def add_vertical_topic_banner(topic_name, banner_color=None):
     """
     Creates a vertical rectangle with topic text on the side of the page.
-    
+
     Parameters:
     - topic_name: The name of the topic to display vertically
+    - banner_color: Optional color name from JSON (e.g., "Cyan", "Blue", "Red")
     """
     global current_topic_text, current_topic_color
-    
+
     # Store the current topic for use when creating new pages
     current_topic_text = topic_name
-    
-    # Assign a consistent color to this topic based on topic name
-    # This ensures the same topic always gets the same color
-    try:
-        # Use hash of topic name to get a consistent color index
-        color_idx = hash(topic_name) % len(BACKGROUND_COLORS)
-        current_topic_color = BACKGROUND_COLORS[color_idx]
-    except:
-        # Fallback to first color if there's an issue
-        current_topic_color = BACKGROUND_COLORS[0]
-    
+
+    # Use provided color if available, otherwise use hash-based color assignment
+    if banner_color:
+        # Use color from JSON
+        current_topic_color = banner_color
+    else:
+        # Fallback: Assign a consistent color based on topic name hash
+        # This ensures the same topic always gets the same color
+        try:
+            # Use hash of topic name to get a consistent color index
+            color_idx = hash(topic_name) % len(BACKGROUND_COLORS)
+            current_topic_color = BACKGROUND_COLORS[color_idx]
+        except:
+            # Fallback to first color if there's an issue
+            current_topic_color = BACKGROUND_COLORS[0]
+
     # Add the vertical topic banner to the current page
     create_vertical_topic_banner()
     
@@ -3362,7 +3500,9 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding, f
             scribus.layoutText(text_frame)
 
             # Expand minimally to ensure all text is visible
-            while scribus.textOverflows(text_frame):
+            overflow_iterations = 0
+            max_overflow_iterations = 100  # Safety limit
+            while scribus.textOverflows(text_frame) and overflow_iterations < max_overflow_iterations:
                 current_w, current_h = scribus.getSize(text_frame)
                 # Check if expanding would exceed bottom margin (with minimal buffer)
                 minimal_buffer = 10  # Just enough for page numbers
@@ -3371,6 +3511,7 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding, f
                     break  # Don't expand if it would exceed margins
                 scribus.sizeObject(current_w, current_h + 3, text_frame)
                 scribus.layoutText(text_frame)
+                overflow_iterations += 1
 
             # Step 2: Calculate exact height using official Scribus methods
             try:
@@ -3412,6 +3553,32 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding, f
                 scribus.sizeObject(text_width, scribus.getSize(text_frame)[1], text_frame)
         except:
             pass
+
+    # CRITICAL FIX: Resize background rectangle to match actual text frame size
+    # This prevents text from overflowing the background rectangle
+    if bg_rect:
+        try:
+            # Get actual text frame dimensions after all resizing
+            actual_frame_width, actual_frame_height = scribus.getSize(text_frame)
+            frame_x, frame_y = scribus.getPosition(text_frame)
+
+            # Calculate background rectangle size including padding
+            bg_width = actual_frame_width + (actual_padding * 2)
+            bg_height = actual_frame_height + (actual_padding * 2)
+
+            # Resize and reposition background rectangle to match
+            scribus.sizeObject(bg_width, bg_height, bg_rect)
+            scribus.moveObject(frame_x - actual_padding, frame_y - actual_padding, bg_rect)
+
+            # Ensure background is behind text
+            try:
+                scribus.moveObjectAbs(frame_x - actual_padding, frame_y - actual_padding, bg_rect)
+            except:
+                pass
+        except Exception as e:
+            # If resize fails, continue without error
+            pass
+
     # Module headers have no spacing after (templates appear directly below)
     # Topic/chapter headers also have no spacing after (description handles its own spacing)
     # This prevents double-spacing between headers and descriptions
@@ -3419,9 +3586,16 @@ def create_styled_header(text, font_size, bold, bg_color, text_color, padding, f
     # Use actual frame height instead of calculated text_h to minimize gap
     actual_frame_height = scribus.getSize(text_frame)[1]
     y_offset += actual_frame_height + spacing_after
-    
+
     # Simple final constraint
     simple_constrain_element(text_frame)
+
+    # Also constrain background rectangle if it exists
+    if bg_rect:
+        try:
+            simple_constrain_element(bg_rect)
+        except:
+            pass
     
     # Text overflow is already handled by the documentation-based approach above
     
@@ -3831,8 +4005,9 @@ def create_pages_from_json(json_path=None, include_quizzes=True, filter_mode="al
 
                 # Clear previous topic banner and set new one
                 current_topic_text = topic.get('name', 'Unnamed')
+                banner_color = topic.get('banner_color', None)  # Read banner color from JSON
                 create_topic_header(current_topic_text)
-                add_vertical_topic_banner(current_topic_text)
+                add_vertical_topic_banner(current_topic_text, banner_color)
 
                 # Topic description
                 desc_text = topic.get("desc","")
