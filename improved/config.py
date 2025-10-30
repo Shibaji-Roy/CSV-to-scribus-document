@@ -220,7 +220,7 @@ ROADSIGN_TEXT_COLOR = "Black"                    # Text color for roadsign label
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Template appearance and limits
-GLOBAL_TEMPLATE_LIMIT = 20 # Maximum number of templates to process
+GLOBAL_TEMPLATE_LIMIT = 60 # Maximum number of templates to process
 BACKGROUND_COLORS = ["Red", "Green", "Yellow", "Blue", "Cyan", "Magenta"]
 
 # ────────────────────────────────────────────────────────────────────────────────
